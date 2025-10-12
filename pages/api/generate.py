@@ -2,29 +2,33 @@ import json
 import os
 import requests
 from http.server import BaseHTTPRequestHandler
+import google.generativeai as genai
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             # Set CORS headers
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.send_header("Content-type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
             
             # Read request body
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers["Content-Length"])
             post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
+            data = json.loads(post_data.decode("utf-8"))
             
-            if not data or 'prompt' not in data:
+            if not data or "prompt" not in data:
                 self.wfile.write(json.dumps({"error": "Missing prompt in request"}).encode())
                 return
             
-            # Check if this is a refinement request
-            if 'html' in data and 'css' in data:
+            # Determine AI model to use
+            ai_model = data.get("ai_model", "openrouter") # Default to OpenRouter
+
+            # Prepare system and user prompts
+            if "html" in data and "css" in data:
                 # Refinement mode
                 system_prompt = """You are Supreme, the world's most advanced AI web component generator. You specialize in creating stunning, modern, responsive web components that represent a paradigm shift in web development.
 
@@ -45,12 +49,12 @@ Return ONLY a JSON object with this exact structure:
 }
 
 Current code to refine:
-HTML: """ + data['html'] + """
-CSS: """ + data['css'] + """
+HTML: """ + data["html"] + """
+CSS: """ + data["css"] + """
 
-User refinement request: """ + data['prompt']
+User refinement request: """ + data["prompt"]
                 
-                user_prompt = f"Refine the provided code based on this request: {data['prompt']}"
+                user_prompt = f"Refine the provided code based on this request: {data["prompt"]}"
             else:
                 # Generation mode
                 system_prompt = """You are Supreme, the world's most advanced AI web component generator. You specialize in creating stunning, modern, responsive web components that represent a paradigm shift in web development.
@@ -82,57 +86,75 @@ Return ONLY a JSON object with this exact structure:
 
 Create components that are not just functional, but truly supreme - representing the impossible made possible."""
                 
-                user_prompt = data['prompt']
+                user_prompt = data["prompt"]
             
-            # Call OpenRouter API directly using requests
-            api_key = os.getenv('OPENROUTER_API_KEY')
-            
-            if not api_key:
-                self.wfile.write(json.dumps({"error": "OpenRouter API key not configured"}).encode())
+            if ai_model == "openrouter":
+                # Call OpenRouter API
+                api_key = os.getenv("OPENROUTER_API_KEY")
+                if not api_key:
+                    self.wfile.write(json.dumps({"error": "OpenRouter API key not configured"}).encode())
+                    return
+                
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://supreme-ai.app",
+                    "X-Title": "Supreme AI Web Snippet Maker"
+                }
+                
+                payload = {
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 4000
+                }
+                
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=60
+                )
+                
+                if response.status_code != 200:
+                    self.wfile.write(json.dumps({"error": f"OpenRouter API request failed: {response.text}"}).encode())
+                    return
+                
+                response_data = response.json()
+                content = response_data["choices"][0]["message"]["content"].strip()
+
+            elif ai_model == "gemini":
+                # Call Gemini API
+                gemini_api_key = os.getenv("GEMINI_API_KEY")
+                if not gemini_api_key:
+                    self.wfile.write(json.dumps({"error": "Gemini API key not configured"}).encode())
+                    return
+                
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel("gemini-2.5-flash")
+                
+                try:
+                    response = model.generate_content([system_prompt, user_prompt])
+                    content = response.text.strip()
+                except Exception as e:
+                    self.wfile.write(json.dumps({"error": f"Gemini API request failed: {str(e)}"}).encode())
+                    return
+            else:
+                self.wfile.write(json.dumps({"error": "Invalid AI model specified"}).encode())
                 return
-            
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://supreme-ai.app',
-                'X-Title': 'Supreme AI Web Snippet Maker'
-            }
-            
-            payload = {
-                "model": "anthropic/claude-3.5-sonnet",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 4000
-            }
-            
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=60
-            )
-            
-            if response.status_code != 200:
-                self.wfile.write(json.dumps({"error": f"API request failed: {response.text}"}).encode())
-                return
-            
-            response_data = response.json()
-            content = response_data['choices'][0]['message']['content'].strip()
             
             # Try to extract JSON from the response
             try:
-                # Look for JSON in the response
-                start = content.find('{')
-                end = content.rfind('}') + 1
+                start = content.find("{")
+                end = content.rfind("}") + 1
                 if start != -1 and end != 0:
                     json_str = content[start:end]
                     result = json.loads(json_str)
                     
-                    # Validate the response has required fields
-                    if 'html' in result and 'css' in result:
+                    if "html" in result and "css" in result:
                         self.wfile.write(json.dumps(result).encode())
                         return
                     else:
@@ -142,8 +164,8 @@ Create components that are not just functional, but truly supreme - representing
                     
             except (json.JSONDecodeError, ValueError) as e:
                 # Fallback: try to parse as separate HTML and CSS blocks
-                html_start = content.find('<')
-                css_start = content.find('{')
+                html_start = content.find("<")
+                css_start = content.find("{")
                 
                 if html_start != -1 and css_start != -1:
                     if html_start < css_start:
@@ -167,15 +189,15 @@ Create components that are not just functional, but truly supreme - representing
             
         except Exception as e:
             self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header("Content-type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
